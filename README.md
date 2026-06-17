@@ -23,18 +23,28 @@ The demo application under test is [SauceDemo](https://www.saucedemo.com/).
 bdd_framework/
 ├── config/
 │   └── settings.py              # Runtime config (URL, browser, waits)
+├── artifacts/
+│   └── mobile_locators_android/ # Simulated Artifactory locator package (no accessibility id)
 ├── constants/
-│   └── navigation_const.py      # Locators + LABEL_MAP registry
+│   ├── navigation_const.py      # Web locators + LABEL_MAP registry
+│   └── mobile_const.py          # Mobile element keys
 ├── features/
-│   └── navigation.feature       # Gherkin scenarios
+│   ├── navigation.feature       # Web Gherkin scenarios
+│   └── mobile_login.feature     # Mobile Android example
 ├── pages/
-│   └── base_page.py             # Shared Selenium actions (POM base)
+│   ├── base_page.py             # Web POM
+│   └── mobile_base_page.py      # Mobile POM (uses conftest locator resolver)
 ├── step_defs/
-│   └── steps.py                 # BDD step definitions
+│   ├── steps.py                 # Web BDD steps
+│   └── mobile_steps.py          # Mobile BDD steps
 ├── tests/
-│   └── test_navigation.py       # Links feature file to pytest
+│   ├── test_navigation.py
+│   ├── test_mobile_login.py     # Skips without Appium
+│   └── test_mobile_locator_resolver.py  # Unit tests (no device)
 ├── utils/
-│   └── webdriver_factory.py     # Chrome WebDriver setup
+│   ├── webdriver_factory.py
+│   ├── mobile_driver_factory.py
+│   └── android_locator_resolver.py
 ├── reports/
 │   └── screenshots/             # Auto-captured on test failure
 ├── conftest.py                  # pytest fixtures & hooks
@@ -412,6 +422,119 @@ The framework currently supports Chrome only. Install Chrome or set `BROWSER=chr
 ### Step definition not found
 
 Ensure `step_defs/steps.py` is listed in `pytest_plugins` inside `conftest.py`.
+
+---
+
+## Mobile Android Example (Artifactory Locators + Accessibility Id Override)
+
+This example shows how to use **locators from an Artifactory-published package** while **overriding with accessibility id** in `conftest.py` when the artifact does not ship accessibility ids.
+
+### Problem
+
+| Source | What it provides |
+|--------|------------------|
+| Artifactory package (`artifacts/mobile_locators_android`) | `resource_id`, `xpath`, `uiautomator` |
+| Your app (real devices) | Stable `accessibility_id` for some elements |
+| conftest.py | Override map + `resolve_android_locator()` |
+
+### Flow
+
+```
+mobile_page.click("username")
+    │
+    ▼
+get_android_locator("username")     ← fixture from conftest
+    │
+    ▼
+resolve_android_locator("username")
+    │
+    ├─ key in ACCESSIBILITY_ID_OVERRIDES?  → ("accessibility_id", "Username")
+    └─ else                                → artifact LOCATORS["username"]
+```
+
+### Artifactory artifact (simulated)
+
+`artifacts/mobile_locators_android/login_screen.py` — no accessibility id:
+
+```python
+LOCATORS = {
+    "username": ("resource_id", "com.saucedemo.mobile:id/username"),
+    "login_button": ("xpath", '//android.widget.Button[@text="LOGIN"]'),
+}
+```
+
+In production this comes from pip:
+
+```bash
+pip install mobile-locators-android==1.0.0 --index-url https://artifactory.company.com/api/pypi/pypi/simple
+```
+
+### Override in conftest.py
+
+```python
+ACCESSIBILITY_ID_OVERRIDES = {
+    "username": "Username",
+    "password": "Password",
+    "login_button": "Login",
+}
+
+def resolve_android_locator(element_key: str) -> tuple[str, str]:
+    return build_locator(element_key, ARTIFACT_LOCATORS, ACCESSIBILITY_ID_OVERRIDES)
+
+@pytest.fixture
+def get_android_locator():
+    return resolve_android_locator
+```
+
+### Use in mobile POM
+
+```python
+class MobileBasePage:
+    def click(self, element_key):
+        strategy, value = self.get_locator(element_key)  # conftest resolver
+        ...
+```
+
+### Run mobile unit tests (no device)
+
+```bash
+pytest tests/test_mobile_locator_resolver.py -v
+```
+
+### Run mobile BDD tests (requires Appium + Android app)
+
+```bash
+pip install Appium-Python-Client
+
+# Start Appium server, connect device/emulator, then:
+$env:APPIUM_SERVER_URL="http://127.0.0.1:4723"
+$env:ANDROID_APP_PACKAGE="com.saucedemo.mobile"
+$env:ANDROID_APP_ACTIVITY=".MainActivity"
+pytest tests/test_mobile_login.py -m mobile
+```
+
+### Mobile environment variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `APPIUM_SERVER_URL` | — | Required for mobile tests (e.g. `http://127.0.0.1:4723`) |
+| `ANDROID_DEVICE` | `emulator-5554` | Device name |
+| `ANDROID_APP_PACKAGE` | `com.saucedemo.mobile` | App package |
+| `ANDROID_APP_ACTIVITY` | `.MainActivity` | Launch activity |
+
+### Add a new accessibility id override
+
+1. Confirm element key exists in artifact `LOCATORS`.
+2. Add to `ACCESSIBILITY_ID_OVERRIDES` in `conftest.py`:
+
+```python
+ACCESSIBILITY_ID_OVERRIDES = {
+    ...
+    "settings_button": "Settings",
+}
+```
+
+3. Use the key in `MobileBasePage` or step defs — resolver picks accessibility id automatically.
 
 ---
 
