@@ -1,8 +1,13 @@
 # BDD Selenium Framework
 
-A lightweight **Behavior-Driven Development (BDD)** test framework built with **Python**, **pytest**, **pytest-bdd**, and **Selenium WebDriver**. It uses the **Page Object Model (POM)** pattern with a **label-based navigation** approach — feature files pass on-screen labels (e.g. `"Logout"`, `"Open Menu"`) and the framework resolves them to locators via a central registry.
+A lightweight **Behavior-Driven Development (BDD)** test framework built with **Python**, **pytest**, **pytest-bdd**, and **Selenium WebDriver**. It uses the **Page Object Model (POM)** pattern with two locator strategies:
 
-The demo application under test is [SauceDemo](https://www.saucedemo.com/).
+| Platform | Pattern |
+|----------|---------|
+| **Web** | Label-based navigation — feature passes on-screen text → `LABEL_MAP` in constants |
+| **Mobile (Android)** | Artifactory locator package + **accessibility id override** in `conftest.py` |
+
+The demo web application is [SauceDemo](https://www.saucedemo.com/). The mobile example simulates locators published to **Artifactory** as a pip package.
 
 ---
 
@@ -12,8 +17,9 @@ The demo application under test is [SauceDemo](https://www.saucedemo.com/).
 |------|---------|
 | [pytest](https://docs.pytest.org/) | Test runner |
 | [pytest-bdd](https://pytest-bdd.readthedocs.io/) | Gherkin `.feature` files → Python tests |
-| [Selenium](https://www.selenium.dev/) | Browser automation |
+| [Selenium](https://www.selenium.dev/) | Web browser automation |
 | [webdriver-manager](https://github.com/SergeyPirogov/webdriver_manager) | Auto-downloads ChromeDriver |
+| [Appium](https://appium.io/) *(optional)* | Mobile Android automation |
 
 ---
 
@@ -57,7 +63,7 @@ bdd_framework/
 
 ## Architecture
 
-### Layer responsibilities
+### Web flow (label-based navigation)
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -73,11 +79,11 @@ bdd_framework/
 └──────────────────────────┬──────────────────────────────┘
                            │
 ┌──────────────────────────▼──────────────────────────────┐
-│  constants/navigation_const.py (Locators + label registry) │
+│  constants/navigation_const.py (Locators + LABEL_MAP registry) │
 └─────────────────────────────────────────────────────────┘
 ```
 
-### Execution flow (label click example)
+#### Web execution flow
 
 ```
 Feature:  When user clicks on "Logout"
@@ -86,7 +92,7 @@ Feature:  When user clicks on "Logout"
 Step def: click_by_label(page, "Logout")
     │
     ▼
-BasePage: click_by_label("Logout")
+BasePage.click_by_label("Logout")
     │
     ▼
 get_label_locator("Logout")  →  LABEL_MAP["logout"]  →  LOGOUT locator
@@ -94,6 +100,126 @@ get_label_locator("Logout")  →  LABEL_MAP["logout"]  →  LOGOUT locator
     ▼
 Selenium: wait + click element
 ```
+
+---
+
+### Mobile flow (Artifactory locators + accessibility id override)
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  features/mobile_login.feature        (Gherkin scenarios)       │
+└──────────────────────────┬───────────────────────────────────┘
+                           │
+┌──────────────────────────▼───────────────────────────────────┐
+│  step_defs/mobile_steps.py            (Mobile step definitions) │
+└──────────────────────────┬───────────────────────────────────┘
+                           │
+┌──────────────────────────▼───────────────────────────────────┐
+│  pages/mobile_base_page.py            (Mobile POM)              │
+│  uses get_android_locator fixture                             │
+└──────────────────────────┬───────────────────────────────────┘
+                           │
+┌──────────────────────────▼───────────────────────────────────┐
+│  conftest.py                                                │
+│  • ACCESSIBILITY_ID_OVERRIDES                               │
+│  • resolve_android_locator()                                │
+│  • get_android_locator fixture                              │
+└──────────────────────────┬───────────────────────────────────┘
+                           │
+┌──────────────────────────▼───────────────────────────────────┐
+│  utils/android_locator_resolver.py   build_locator()           │
+└──────────────┬─────────────────────────────┬─────────────────┘
+               │                             │
+    ┌──────────▼──────────┐       ┌──────────▼──────────────────┐
+    │ conftest overrides  │       │ Artifactory artifact package  │
+    │ accessibility_id    │       │ artifacts/mobile_locators_  │
+    │ (QA-owned)          │       │ android/login_screen.py       │
+    │                     │       │ resource_id / xpath /         │
+    │                     │       │ uiautomator only              │
+    └─────────────────────┘       └───────────────────────────────┘
+```
+
+#### Mobile locator resolution flow
+
+```mermaid
+flowchart TD
+    A[Feature / Step def / MobileBasePage] -->|element_key e.g. username| B[get_android_locator fixture]
+    B --> C[resolve_android_locator in conftest.py]
+    C --> D[build_locator in android_locator_resolver.py]
+    D --> E{element_key in ACCESSIBILITY_ID_OVERRIDES?}
+    E -->|Yes| F["Return accessibility_id + value from conftest"]
+    E -->|No| G{element_key in artifact LOCATORS?}
+    G -->|Yes| H["Return strategy from Artifactory package e.g. resource_id, xpath"]
+    G -->|No| I[Raise KeyError with known keys]
+    F --> J[MobileBasePage maps strategy to AppiumBy]
+    H --> J
+    J --> K[Appium find_element + action]
+```
+
+#### End-to-end example: `mobile_page.login("standard_user", "secret_sauce")`
+
+```
+mobile_page.type_into("username", "standard_user")
+    │
+    ▼
+get_locator("username")                    ← fixture from conftest
+    │
+    ▼
+resolve_android_locator("username")
+    │
+    ▼
+build_locator("username", ARTIFACT_LOCATORS, ACCESSIBILITY_ID_OVERRIDES)
+    │
+    ├─ "username" IS in ACCESSIBILITY_ID_OVERRIDES
+    │       → ("accessibility_id", "Username")
+    │
+    └─ if NOT in overrides (e.g. hypothetical new key)
+            → ("resource_id", "com.saucedemo.mobile:id/username")  from artifact
+
+    ▼
+MobileBasePage._find_by_strategy("accessibility_id", "Username")
+    │
+    ▼
+driver.find_element(AppiumBy.ACCESSIBILITY_ID, "Username")
+```
+
+#### Who owns what?
+
+| File | Owns | Does NOT own |
+|------|------|--------------|
+| `artifacts/mobile_locators_android/login_screen.py` | Base locators from dev/Artifactory (`resource_id`, `xpath`, `uiautomator`) | `accessibility_id` |
+| `conftest.py` | `ACCESSIBILITY_ID_OVERRIDES`, `resolve_android_locator()`, `get_android_locator` fixture | Appium driver logic |
+| `utils/android_locator_resolver.py` | Merge logic (override wins, else artifact) | Override values |
+| `constants/mobile_const.py` | Element key names (`username`, `login_button`, …) | Locator tuples |
+| `pages/mobile_base_page.py` | Selenium/Appium actions, strategy → `AppiumBy` mapping | Locator source |
+| `step_defs/mobile_steps.py` | Gherkin → page method calls | Locator resolution |
+
+#### Locator resolution priority
+
+| Priority | Source | Example result for `"username"` |
+|----------|--------|----------------------------------|
+| **1 (wins)** | `ACCESSIBILITY_ID_OVERRIDES` in `conftest.py` | `("accessibility_id", "Username")` |
+| **2 (fallback)** | `LOCATORS` in Artifactory artifact | `("resource_id", "com.saucedemo.mobile:id/username")` |
+| **3 (error)** | Key missing in both | `KeyError` |
+
+#### Strategy → Appium mapping (`mobile_base_page.py`)
+
+| Resolver returns | AppiumBy used |
+|------------------|---------------|
+| `accessibility_id` | `AppiumBy.ACCESSIBILITY_ID` |
+| `resource_id` | `AppiumBy.ID` |
+| `xpath` | `AppiumBy.XPATH` |
+| `uiautomator` | `AppiumBy.ANDROID_UIAUTOMATOR` |
+
+#### Web vs mobile locator pattern
+
+| | Web | Mobile Android |
+|---|-----|----------------|
+| **Feature input** | On-screen label (`"Logout"`) | Element key via page/step (`username`) |
+| **Registry location** | `constants/navigation_const.py` → `LABEL_MAP` | Artifactory artifact + `conftest.py` overrides |
+| **Resolver** | `get_label_locator()` | `resolve_android_locator()` |
+| **Override support** | Add row to `LABEL_MAP` | Add row to `ACCESSIBILITY_ID_OVERRIDES` |
+| **Fallback** | None (explicit map only) | Artifact locator when no override |
 
 ---
 
@@ -287,9 +413,12 @@ Steps are registered via `pytest_plugins` in `conftest.py`.
 
 | Fixture | Scope | Description |
 |---------|-------|-------------|
-| `driver` | function | Creates and quits Chrome per test |
+| `driver` | function | Creates and quits Chrome per web test |
+| `mobile_driver` | function | Creates Appium session (skips if `APPIUM_SERVER_URL` unset) |
 | `base_url` | session | Returns `BASE_URL` from settings |
-| `page` | function | Returns `BasePage(driver)` instance |
+| `page` | function | Returns `BasePage(driver)` for web tests |
+| `get_android_locator` | function | Returns `resolve_android_locator` for mobile POM |
+| `mobile_page` | function | Returns `MobileBasePage(mobile_driver, get_android_locator)` |
 
 ### Screenshot on failure
 
@@ -384,7 +513,7 @@ page.type_into(NEW_FIELD, "some value")
 | `testpaths` | `tests` |
 | `bdd_features_base_dir` | `features` |
 | `addopts` | `-v --tb=short` |
-| Markers | `navigation` |
+| Markers | `navigation`, `mobile`, `example` |
 
 ---
 
@@ -425,59 +554,56 @@ Ensure `step_defs/steps.py` is listed in `pytest_plugins` inside `conftest.py`.
 
 ---
 
-## Mobile Android Example (Artifactory Locators + Accessibility Id Override)
+## Mobile Android — Locator Flow (Detailed)
 
-This example shows how to use **locators from an Artifactory-published package** while **overriding with accessibility id** in `conftest.py` when the artifact does not ship accessibility ids.
+This is the core mobile pattern: **locators come from an Artifactory-published package**, but **QA overrides with accessibility id in `conftest.py`** because the artifact does not ship accessibility ids.
 
-### Problem
+### Why this pattern exists
 
-| Source | What it provides |
-|--------|------------------|
-| Artifactory package (`artifacts/mobile_locators_android`) | `resource_id`, `xpath`, `uiautomator` |
-| Your app (real devices) | Stable `accessibility_id` for some elements |
-| conftest.py | Override map + `resolve_android_locator()` |
+| Party | Delivers | Limitation |
+|-------|----------|------------|
+| Dev / mobile team | Pip package to Artifactory with `resource_id`, `xpath`, `uiautomator` | No `accessibility_id` in the artifact |
+| QA / automation | Stable `accessibility_id` values observed on real devices | Should not fork the artifact — override in test repo |
+| `conftest.py` | Single place to wire overrides for the whole suite | Keeps artifact package read-only |
 
-### Flow
+### Step-by-step locator flow
 
+**Step 1 — Artifactory package (installed via pip in real projects)**
+
+`artifacts/mobile_locators_android/login_screen.py` simulates what you get from:
+
+```bash
+pip install mobile-locators-android==1.0.0 \
+  --index-url https://artifactory.company.com/api/pypi/pypi/simple
 ```
-mobile_page.click("username")
-    │
-    ▼
-get_android_locator("username")     ← fixture from conftest
-    │
-    ▼
-resolve_android_locator("username")
-    │
-    ├─ key in ACCESSIBILITY_ID_OVERRIDES?  → ("accessibility_id", "Username")
-    └─ else                                → artifact LOCATORS["username"]
-```
-
-### Artifactory artifact (simulated)
-
-`artifacts/mobile_locators_android/login_screen.py` — no accessibility id:
 
 ```python
 LOCATORS = {
     "username": ("resource_id", "com.saucedemo.mobile:id/username"),
+    "password": ("resource_id", "com.saucedemo.mobile:id/password"),
     "login_button": ("xpath", '//android.widget.Button[@text="LOGIN"]'),
+    "inventory_list": ("uiautomator", 'new UiSelector().resourceId("com.saucedemo.mobile:id/inventory_list")'),
+    "menu_button": ("resource_id", "com.saucedemo.mobile:id/menu"),
+    "logout_button": ("xpath", '//android.widget.TextView[@text="Logout"]'),
 }
 ```
 
-In production this comes from pip:
-
-```bash
-pip install mobile-locators-android==1.0.0 --index-url https://artifactory.company.com/api/pypi/pypi/simple
-```
-
-### Override in conftest.py
+**Step 2 — QA override map in `conftest.py`**
 
 ```python
 ACCESSIBILITY_ID_OVERRIDES = {
     "username": "Username",
     "password": "Password",
     "login_button": "Login",
+    "inventory_list": "Inventory list",
+    "menu_button": "Open navigation menu",
+    "logout_button": "Logout",
 }
+```
 
+**Step 3 — Resolver method in `conftest.py`**
+
+```python
 def resolve_android_locator(element_key: str) -> tuple[str, str]:
     return build_locator(element_key, ARTIFACT_LOCATORS, ACCESSIBILITY_ID_OVERRIDES)
 
@@ -486,27 +612,81 @@ def get_android_locator():
     return resolve_android_locator
 ```
 
-### Use in mobile POM
+**Step 4 — Merge logic in `utils/android_locator_resolver.py`**
+
+```python
+def build_locator(element_key, artifact_locators, accessibility_overrides):
+    if element_key in accessibility_overrides:
+        return ("accessibility_id", accessibility_overrides[element_key])
+    if element_key not in artifact_locators:
+        raise KeyError(...)
+    return artifact_locators[element_key]
+```
+
+**Step 5 — Mobile POM consumes resolver via fixture**
 
 ```python
 class MobileBasePage:
+    def __init__(self, driver, get_locator):
+        self.get_locator = get_locator   # ← resolve_android_locator from conftest
+
     def click(self, element_key):
-        strategy, value = self.get_locator(element_key)  # conftest resolver
-        ...
+        strategy, value = self.get_locator(element_key)
+        # maps to AppiumBy.ACCESSIBILITY_ID / ID / XPATH / ANDROID_UIAUTOMATOR
+        self.driver.find_element(by_map[strategy], value).click()
 ```
 
-### Run mobile unit tests (no device)
+**Step 6 — BDD step calls page (no locator logic in steps)**
+
+```gherkin
+When mobile user logs in with username "standard_user" and password "secret_sauce"
+```
+
+```python
+@when('mobile user logs in with username "{username}" and password "{password}"')
+def mobile_login(mobile_page, username, password):
+    mobile_page.login(username, password)   # uses element keys, not raw locators
+```
+
+### Resolved locator examples
+
+| `element_key` | Override in conftest? | Final locator used at runtime |
+|---------------|----------------------|-------------------------------|
+| `username` | Yes → `"Username"` | `("accessibility_id", "Username")` |
+| `login_button` | Yes → `"Login"` | `("accessibility_id", "Login")` |
+| `inventory_list` | Yes → `"Inventory list"` | `("accessibility_id", "Inventory list")` |
+| *(any key not in overrides)* | No | Whatever the artifact ships, e.g. `("xpath", '...')` |
+
+### Feature file (`features/mobile_login.feature`)
+
+```gherkin
+@mobile @example
+Feature: Mobile Android login
+
+  Scenario: Login using overridden accessibility ids
+    When mobile user logs in with username "standard_user" and password "secret_sauce"
+    Then mobile inventory should be visible
+
+  Scenario: Logout via mobile menu labels
+    When mobile user logs in with username "standard_user" and password "secret_sauce"
+    And mobile user taps "Open Menu"
+    And mobile user taps "Logout"
+    Then mobile login screen should be visible
+```
+
+### Run mobile tests
+
+**Unit tests (no device — validates resolver logic only)**
 
 ```bash
 pytest tests/test_mobile_locator_resolver.py -v
 ```
 
-### Run mobile BDD tests (requires Appium + Android app)
+**BDD tests (requires Appium + Android app)**
 
 ```bash
 pip install Appium-Python-Client
 
-# Start Appium server, connect device/emulator, then:
 $env:APPIUM_SERVER_URL="http://127.0.0.1:4723"
 $env:ANDROID_APP_PACKAGE="com.saucedemo.mobile"
 $env:ANDROID_APP_ACTIVITY=".MainActivity"
@@ -517,14 +697,16 @@ pytest tests/test_mobile_login.py -m mobile
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `APPIUM_SERVER_URL` | — | Required for mobile tests (e.g. `http://127.0.0.1:4723`) |
+| `APPIUM_SERVER_URL` | — | Required for mobile BDD tests (e.g. `http://127.0.0.1:4723`) |
 | `ANDROID_DEVICE` | `emulator-5554` | Device name |
 | `ANDROID_APP_PACKAGE` | `com.saucedemo.mobile` | App package |
 | `ANDROID_APP_ACTIVITY` | `.MainActivity` | Launch activity |
 
-### Add a new accessibility id override
+### How to add a new mobile element
 
-1. Confirm element key exists in artifact `LOCATORS`.
+**Case A — artifact already has the key, app has accessibility id**
+
+1. Confirm key exists in artifact `LOCATORS` (or wait for new artifact version).
 2. Add to `ACCESSIBILITY_ID_OVERRIDES` in `conftest.py`:
 
 ```python
@@ -534,16 +716,46 @@ ACCESSIBILITY_ID_OVERRIDES = {
 }
 ```
 
-3. Use the key in `MobileBasePage` or step defs — resolver picks accessibility id automatically.
+3. Use the key in `MobileBasePage` or step defs — no other changes needed.
+
+**Case B — new element in new artifact version**
+
+1. Upgrade pip package from Artifactory.
+2. Add element key to `constants/mobile_const.py` (optional, for readability).
+3. Add accessibility override in `conftest.py` if the app exposes one.
+4. If no accessibility id exists, resolver automatically uses artifact locator.
+
+**Case C — tap by feature label (menu-style)**
+
+Map feature label → element key in `step_defs/mobile_steps.py`:
+
+```python
+label_map = {
+    "open menu": MENU_BUTTON,
+    "logout": LOGOUT_BUTTON,
+}
+mobile_page.click(label_map[key])   # key still goes through conftest resolver
+```
+
+### Mobile troubleshooting
+
+| Error | Fix |
+|-------|-----|
+| `KeyError: Unknown mobile element` | Key missing from artifact — upgrade package or use correct key |
+| Tests skipped | Set `APPIUM_SERVER_URL` |
+| Wrong element clicked | Check `ACCESSIBILITY_ID_OVERRIDES` value matches device accessibility label |
+| Override not applied | Ensure element key matches exactly (e.g. `"username"` not `"Username"`) |
+| `ImportError: Appium` | `pip install Appium-Python-Client` |
 
 ---
 
 ## Design Decisions
 
-- **Registry-only label lookup** — no dynamic XPath; every label must be explicitly mapped for predictable, debuggable tests.
-- **Single step file** — all steps in `step_defs/steps.py` for simplicity on a small project.
+- **Registry-only web label lookup** — no dynamic XPath; every web label must be explicitly mapped in `LABEL_MAP`.
+- **Mobile override in conftest** — accessibility ids live in test repo, not in Artifactory artifact; artifact remains the fallback.
+- **Single step files per platform** — `steps.py` for web, `mobile_steps.py` for mobile.
 - **Flat constants** — locators as module-level variables instead of nested classes.
-- **Chrome only** — keeps driver setup simple; extend `webdriver_factory.py` for other browsers when needed.
+- **Chrome only (web)** — extend `webdriver_factory.py` for other browsers when needed.
 
 ---
 
